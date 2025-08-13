@@ -1,0 +1,5 @@
+Backend listening on http://localhost:6969
+[0mGET /health [32m200[0m 2.171 ms - 15[0m
+[socket] connected: fIhX13aOQ14F4zgsAAAB
+[socket] disconnected: fIhX13aOQ14F4zgsAAAB reason=transport close
+[0mPOST /api/user/login [32m200[0m 0.744 ms - 226[0m
