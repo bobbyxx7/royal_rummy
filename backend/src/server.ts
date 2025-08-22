@@ -4,32 +4,57 @@ import http from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import rateLimit from 'express-rate-limit';
 import { Server } from 'socket.io';
 
 import { authRouter } from './services/auth.routes';
 import { userRouter } from './services/user.routes';
 import { connectMongo } from './db';
-import { rummyNamespace } from './socket/rummy.namespace';
+import { rummyNamespace, restoreSnapshots } from './socket/rummy.namespace';
 import { registerIo } from './socket/emitter';
 import { adminRouter } from './services/admin.routes';
 import { tablesRouter } from './services/tables.routes';
+import { walletRouter } from './services/wallet.routes';
+import { loadConfig } from './config';
+import { requestId } from './middleware/requestId';
+import { metricsRouter } from './services/metrics.routes';
+import { profileHttp } from './middleware/profile';
+import { testRouter } from './services/test.routes';
+import { getCorsOptions } from './services/cors';
 
 const app = express();
 const server = http.createServer(app);
 
-const PORT = Number(process.env.PORT || 6969);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*';
+const cfg = loadConfig();
+const PORT = cfg.port;
+const CLIENT_ORIGIN = cfg.clientOrigin;
 
 // Middleware
 app.use(helmet());
-app.use(cors({ origin: CLIENT_ORIGIN, credentials: true }));
+app.use(cors(getCorsOptions()));
+app.use(requestId);
+app.use(profileHttp);
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(morgan('dev'));
+// Basic rate limiting for public APIs
+const limiter = rateLimit({ windowMs: cfg.rateLimitWindowMs, max: cfg.rateLimitMax, standardHeaders: true, legacyHeaders: false });
+app.use('/api/', limiter);
 
 // Health
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+// Readiness (checks DB when configured)
+app.get('/ready', async (_req, res) => {
+  try {
+    if (cfg.mongoUri) {
+      await connectMongo(cfg.mongoUri);
+    }
+    return res.json({ status: 'ready' });
+  } catch (e) {
+    return res.status(500).json({ status: 'not-ready' });
+  }
 });
 
 // API base matching mobile app constants
@@ -39,23 +64,30 @@ app.use('/api/user', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api', tablesRouter);
+app.use('/api/wallet', walletRouter);
+app.use('/api', metricsRouter);
+app.use('/api/test', testRouter);
 
-const io = new Server(server, {
-  cors: { origin: CLIENT_ORIGIN, credentials: true },
-  path: '/socket.io',
-});
+const io = new Server(server, { cors: getCorsOptions(), path: '/socket.io' });
 
 // Socket namespace expected by app: '/rummy'
 registerIo(io);
 rummyNamespace(io);
 
 async function start() {
-  const mongoUri = process.env.MONGO_URI || '';
+  const mongoUri = cfg.mongoUri || '';
   if (mongoUri) {
     try {
       await connectMongo(mongoUri);
       // eslint-disable-next-line no-console
       console.log('[db] connected');
+      try { await restoreSnapshots(); console.log('[restore] snapshots restored'); } catch {}
+      // Warn if rake configured but rake wallet not set
+      const rakePct = Number(process.env.RAKE_PERCENT || 0);
+      if (rakePct > 0 && !process.env.RAKE_WALLET_USER_ID) {
+        // eslint-disable-next-line no-console
+        console.warn('[config] RAKE_PERCENT > 0 but RAKE_WALLET_USER_ID is not set. Rake will not be credited.');
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[db] connection failed', e);
@@ -63,7 +95,7 @@ async function start() {
   }
   server.listen(PORT, () => {
     // eslint-disable-next-line no-console
-    console.log(`Backend listening on http://localhost:${PORT}`);
+    console.log(`Backend listening on ${cfg.baseUrl}`);
   });
 }
 

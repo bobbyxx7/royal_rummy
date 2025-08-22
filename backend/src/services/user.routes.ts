@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { usersById } from './auth.routes';
 import { UserModel } from '../db';
 import { isDbConnected } from '../auth';
+import { ErrorCodes } from '../errors';
 import { emitWalletUpdate } from '../socket/emitter';
 
 const router = Router();
@@ -20,7 +21,7 @@ const updateSchema = z.object({
 router.post('/update_user_data', (req, res) => {
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ code: 400, message: 'Invalid request' });
+    return res.status(ErrorCodes.INVALID_REQUEST).json({ code: ErrorCodes.INVALID_REQUEST, message: 'Invalid request' });
   }
 
   const { user_id, name, gender, referral_code, user_type, amount } = parsed.data;
@@ -46,12 +47,12 @@ router.post('/update_user_data', (req, res) => {
       } else {
         await UserModel.updateOne({ _id: user_id }, { $set }).exec().catch(() => {});
       }
-      const dbUser = await UserModel.findById(user_id).lean().exec();
-      if (!dbUser) return res.status(404).json({ code: 404, message: 'User not found' });
+      const dbUser = await UserModel.findById(user_id).lean().exec() as any;
+      if (!dbUser) return res.status(ErrorCodes.NOT_FOUND).json({ code: ErrorCodes.NOT_FOUND, message: 'User not found' });
       if (amount !== undefined) {
         try { emitWalletUpdate(String(user_id), String(dbUser.wallet), 'user_update', 'update_user_data'); } catch {}
       }
-      return res.json({ code: 200, message: 'Success', user_data: [{
+      return res.json({ code: ErrorCodes.SUCCESS, message: 'Success', user_data: [{
         id: String(dbUser._id),
         name: dbUser.name,
         mobile: dbUser.mobile,
@@ -68,7 +69,7 @@ router.post('/update_user_data', (req, res) => {
   // Fallback to in-memory update for dev
   const user = usersById.get(user_id);
   if (!user) {
-    return res.status(404).json({ code: 404, message: 'User not found' });
+    return res.status(ErrorCodes.NOT_FOUND).json({ code: ErrorCodes.NOT_FOUND, message: 'User not found' });
   }
   if (name !== undefined) user.name = name;
   if (gender !== undefined) user.gender = gender;
@@ -80,7 +81,7 @@ router.post('/update_user_data', (req, res) => {
     const updated = current + (Number.isFinite(delta) ? delta : 0);
     user.wallet = updated.toFixed(2);
   }
-  return res.json({ code: 200, message: 'Success', user_data: [{
+  return res.json({ code: ErrorCodes.SUCCESS, message: 'Success', user_data: [{
     id: user.id,
     name: user.name,
     mobile: user.mobile,

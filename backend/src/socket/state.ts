@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { loadConfig } from '../config';
+import { loadRulesConfig } from './rules.config';
 
 export type SuitCode = 'RP' | 'BP' | 'BL' | 'RS';
 export type RankCode = 'A' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K';
@@ -21,6 +23,7 @@ export type Table = {
   players: string[]; // userIds by seat index
   createdAt: number;
   pointValue?: number; // per-point value for Points Rummy
+  format?: 'points' | 'deals' | 'pool';
 };
 
 export type Game = {
@@ -34,6 +37,7 @@ export type Game = {
   wildCardRank?: RankCode;
   currentTurn: number; // seat index
   startedAt: number;
+  turnDeadline?: number; // epoch ms when the current turn ends
   drawnThisTurn: boolean[]; // per seat: has drawn a card this turn
   toss?: { winnerSeat: number; winnerUserId: string; topCard?: CardCode; bottomCard?: CardCode; cardsByUser?: Record<string, CardCode>; order?: string[] };
   hasPlayedAnyTurn: boolean[]; // per seat: has completed at least one draw+discard cycle
@@ -83,24 +87,31 @@ export function shuffle<T>(arr: T[]): T[] {
 export function chooseWildRank(): RankCode | undefined {
   const enabled = (process.env.WILD_RANK_ENABLED ?? '1') !== '0';
   if (!enabled) return undefined;
+  // Test hook: fixed wild rank
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'test' && process.env.TEST_WILD_RANK) {
+    const r = String(process.env.TEST_WILD_RANK).toUpperCase();
+    if (['A','2','3','4','5','6','7','8','9','10','J','Q','K'].includes(r)) return r as RankCode;
+  }
   const ranksNoA = RANKS; // allow 'A' as 1 as well; client maps to 1
   return ranksNoA[Math.floor(Math.random() * ranksNoA.length)];
 }
 
-export function createOrFindTable(bootValue: string, noOfPlayers: number): Table {
+export function createOrFindTable(bootValue: string, noOfPlayers: number, format: 'points' | 'deals' | 'pool' = 'points'): Table {
   // Try to find an existing waiting table with same config and space
   for (const t of waitingTables.values()) {
     if (
       t.status === 'waiting' &&
       t.bootValue === bootValue &&
       t.noOfPlayers === noOfPlayers &&
+      (t.format || 'points') === format &&
       t.players.filter(Boolean).length < t.noOfPlayers
     ) {
       return t;
     }
   }
   const id = randomUUID();
-  const defaultPoint = Number(process.env.POINT_VALUE || 1);
+  const cfg = loadConfig();
+  const defaultPoint = loadRulesConfig().pointValue || cfg.pointValue;
   const table: Table = {
     id,
     bootValue,
@@ -109,6 +120,7 @@ export function createOrFindTable(bootValue: string, noOfPlayers: number): Table
     players: Array(noOfPlayers).fill(''),
     createdAt: Date.now(),
     pointValue: defaultPoint,
+    format,
   };
   waitingTables.set(id, table);
   return table;
@@ -128,37 +140,71 @@ export function joinTable(table: Table, userId: string): { seatNo: number } | nu
 export function startGameForTable(table: Table): Game {
   const activePlayers = table.players.filter(Boolean);
   const gameId = randomUUID();
-  const deck = buildDeck(true, true);
+  // Build deck with optional test override
+  let deck: CardCode[];
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'test' && process.env.TEST_FIXED_DECK) {
+    const parts = String(process.env.TEST_FIXED_DECK)
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+    deck = parts as CardCode[];
+  } else {
+    deck = buildDeck(true, true);
+  }
   const cardsPerPlayer = 13;
 
   // Toss for seating order: draw one card per player, highest rank first (Ace high)
   // Phase: toss
   const rankOrder: Record<string, number> = { 'A': 14, 'K': 13, 'Q': 12, 'J': 11 };
   const suitPriority: Record<SuitCode, number> = { RP: 4, BP: 3, BL: 2, RS: 1 }; // hearts > spades > clubs > diamonds
-  const tossDraws: { uid: string; card: CardCode; value: number }[] = [];
-  // For toss, strictly use a 52-card deck (no jokers)
-  const tossDeck = buildDeck(false, false);
   const joinOrder = [...activePlayers];
-  for (let p = 0; p < activePlayers.length; p++) {
-    const tossCard = tossDeck.shift()!;
-    const suit = tossCard.slice(0, 2).toUpperCase() as SuitCode;
-    const r = tossCard.slice(2).toUpperCase();
-    const base = rankOrder[r] || Number(r) || 0;
-    const val = base * 10 + (suitPriority[suit] || 0); // tie-break by suit priority
-    tossDraws.push({ uid: activePlayers[p], card: tossCard, value: val });
-  }
-  tossDraws.sort((a, b) => b.value - a.value);
-  const orderedPlayers = tossDraws.map(t => t.uid);
-  const winnerSeat = 0;
-  const drawForTossTop = tossDraws[0]?.card;
-  const drawForTossBottom = tossDraws[1]?.card || drawForTossTop;
+  let orderedPlayers: string[] = [];
+  let winnerSeat = 0;
+  let drawForTossTop: CardCode | undefined;
+  let drawForTossBottom: CardCode | undefined;
   const cardsByUser: Record<string, CardCode> = {};
-  for (const t of tossDraws) cardsByUser[t.uid] = t.card;
+  if ((process.env.TOSS_JOIN_ORDER ?? '0') === '1') {
+    orderedPlayers = [...joinOrder];
+    winnerSeat = 0;
+  } else {
+    const tossDraws: { uid: string; card: CardCode; value: number }[] = [];
+    const tossDeck = buildDeck(false, false);
+    for (let p = 0; p < activePlayers.length; p++) {
+      const tossCard = tossDeck.shift()!;
+      const suit = tossCard.slice(0, 2).toUpperCase() as SuitCode;
+      const r = tossCard.slice(2).toUpperCase();
+      const base = rankOrder[r] || Number(r) || 0;
+      const val = base * 10 + (suitPriority[suit] || 0); // tie-break by suit priority
+      tossDraws.push({ uid: activePlayers[p], card: tossCard, value: val });
+    }
+    tossDraws.sort((a, b) => b.value - a.value);
+    orderedPlayers = tossDraws.map(t => t.uid);
+    winnerSeat = 0;
+    drawForTossTop = tossDraws[0]?.card;
+    drawForTossBottom = tossDraws[1]?.card || drawForTossTop;
+    for (const t of tossDraws) cardsByUser[t.uid] = t.card;
+  }
 
-  // Phase: dealing
+  // Phase: dealing with optional fixed hands per seat in tests
   const playersHands: CardCode[][] = orderedPlayers.map(() => []);
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'test') {
+    for (let p = 0; p < orderedPlayers.length; p++) {
+      const envKey = `TEST_HAND_S${p}`;
+      const val = (process.env as any)[envKey];
+      if (val && typeof val === 'string' && val.trim().length > 0) {
+        const codes = val.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+        for (const c of codes) {
+          const idx = deck.indexOf(c);
+          if (idx >= 0) deck.splice(idx, 1);
+        }
+        playersHands[p] = codes.slice(0, cardsPerPlayer) as CardCode[];
+      }
+    }
+  }
+  // Deal remaining cards up to cardsPerPlayer
   for (let i = 0; i < cardsPerPlayer; i++) {
     for (let p = 0; p < orderedPlayers.length; p++) {
+      if ((playersHands[p] || []).length > i) continue;
       const card = deck.shift();
       if (card) playersHands[p].push(card);
     }
@@ -180,6 +226,7 @@ export function startGameForTable(table: Table): Game {
     wildCardRank,
     currentTurn: winnerSeat,
     startedAt: Date.now(),
+    turnDeadline: undefined,
     drawnThisTurn: orderedPlayers.map(() => false),
     hasPlayedAnyTurn: orderedPlayers.map(() => false),
     packed: orderedPlayers.map(() => false),
@@ -207,6 +254,17 @@ const suitToCode: Record<string, SuitCode> = {
 
 export function clientCardToCode(card: any): CardCode | null {
   if (!card) return null;
+  // Accept already-encoded card codes (e.g., 'RP7', 'BL10', 'JKR1')
+  if (typeof card === 'string') {
+    const s = String(card).toUpperCase();
+    if (s.startsWith('JKR')) return s;
+    const suit = s.slice(0, 2);
+    const rank = s.slice(2);
+    if (['RP', 'BP', 'BL', 'RS'].includes(suit) && ['A','2','3','4','5','6','7','8','9','10','J','Q','K'].includes(rank)) {
+      return s as CardCode;
+    }
+    return null;
+  }
   if (card.isJoker) return 'JKR1';
   const suit: SuitCode | undefined = suitToCode[String(card.suit || '').toLowerCase()];
   if (!suit) return null;

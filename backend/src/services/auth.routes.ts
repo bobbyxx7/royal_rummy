@@ -4,8 +4,10 @@ import { v4 as uuid } from 'uuid';
 import bcrypt from 'bcryptjs';
 import { UserModel } from '../db';
 import { isDbConnected } from '../auth';
+import { ErrorCodes } from '../errors';
 
 const router = Router();
+const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
 
 // In-memory user store for initial development
 type User = {
@@ -52,18 +54,18 @@ const loginSchema = z.object({
 router.post('/login', async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ code: 400, message: 'Invalid request' });
+    return res.status(ErrorCodes.INVALID_REQUEST).json({ code: ErrorCodes.INVALID_REQUEST, message: 'Invalid request' });
   }
   const { mobile, password } = parsed.data;
 
-  // Prefer DB user if connected; fall back to in-memory for dev
+  // Prefer DB user if connected; fall back to in-memory only in non-production
   if (isDbConnected()) {
-    const dbUser = await UserModel.findOne({ mobile }).lean().exec().catch(() => null);
+    const dbUser = await UserModel.findOne({ mobile }).lean().exec().catch(() => null) as any;
     if (dbUser) {
       const ok = await bcrypt.compare(password, dbUser.passwordHash).catch(() => false);
-      if (!ok) return res.status(401).json({ code: 401, message: 'Invalid credentials' });
+      if (!ok) return res.status(ErrorCodes.UNAUTHORIZED).json({ code: ErrorCodes.UNAUTHORIZED, message: 'Invalid credentials' });
       return res.json({
-        code: 200,
+        code: ErrorCodes.SUCCESS,
         message: 'Success',
         user_data: [
           {
@@ -81,12 +83,16 @@ router.post('/login', async (req, res) => {
     }
   }
 
+  if (isProd) {
+    return res.status(503).json({ code: 503, message: 'Service unavailable' });
+  }
+
   const existing = usersByMobile.get(mobile);
   if (!existing) {
     // For dev, auto-create user on first login to unblock frontend flows
     const user = ensureUserFromBody({ name: '', mobile, password });
     return res.json({
-      code: 200,
+      code: ErrorCodes.SUCCESS,
       message: 'Success',
       user_data: [
         {
@@ -104,11 +110,11 @@ router.post('/login', async (req, res) => {
   }
 
   if (existing.passwordHash !== password) {
-    return res.status(401).json({ code: 401, message: 'Invalid credentials' });
+    return res.status(ErrorCodes.UNAUTHORIZED).json({ code: ErrorCodes.UNAUTHORIZED, message: 'Invalid credentials' });
   }
 
   return res.json({
-    code: 200,
+    code: ErrorCodes.SUCCESS,
     message: 'Success',
     user_data: [
       {
@@ -134,12 +140,12 @@ const sendOtpSchema = z.object({
 router.post('/send_otp', (req, res) => {
   const parsed = sendOtpSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ code: 400, message: 'Invalid request' });
+    return res.status(ErrorCodes.INVALID_REQUEST).json({ code: ErrorCodes.INVALID_REQUEST, message: 'Invalid request' });
   }
   // Simulate OTP flow: return an otp_id
   const otp_id = uuid();
   res.setHeader('set-cookie', `ci_session=${uuid()}; Path=/; HttpOnly`);
-  return res.json({ code: 200, message: 'Success', otp_id });
+  return res.json({ code: ErrorCodes.SUCCESS, message: 'Success', otp_id });
 });
 
 const registerSchema = z.object({
@@ -155,7 +161,7 @@ const registerSchema = z.object({
 router.post('/register', (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ code: 400, message: 'Invalid request' });
+    return res.status(ErrorCodes.INVALID_REQUEST).json({ code: ErrorCodes.INVALID_REQUEST, message: 'Invalid request' });
   }
 
   const { name, mobile, password, gender, referral_code } = parsed.data;
@@ -180,7 +186,7 @@ router.post('/register', (req, res) => {
       });
     } catch {}
   })();
-  return res.json({ code: 200, message: 'Success', user_id: user.id, token: user.token });
+  return res.json({ code: ErrorCodes.SUCCESS, message: 'Success', user_id: user.id, token: user.token });
 });
 
 export { router as authRouter, usersById };

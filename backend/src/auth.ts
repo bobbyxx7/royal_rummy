@@ -6,7 +6,8 @@ export function isDbConnected(): boolean {
 }
 
 export async function validateUserToken(userId?: string, token?: string): Promise<boolean> {
-  if (!isDbConnected()) return true; // allow in dev when DB not configured
+  // In development (no DB), allow; in production, do not allow missing DB/token
+  if (!isDbConnected()) return process.env.NODE_ENV !== 'production';
   if (!userId || !token) return false;
   try {
     const user = await UserModel.findOne({ _id: userId, token }).select('_id').lean().exec();
