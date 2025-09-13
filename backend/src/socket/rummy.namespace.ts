@@ -108,6 +108,7 @@ export function rummyNamespace(io: Server) {
   function scheduleBotTurn(gameId: string) {
     if (disableTimers) return;
     if (botTimers.has(gameId)) return;
+    const botMoveMs = Math.max(100, Number(process.env.BOT_MOVE_MS || 200));
     const run = () => {
       const game = games.get(gameId);
       if (!game) return;
@@ -145,14 +146,14 @@ export function rummyNamespace(io: Server) {
       // schedule next if next is also bot
       const nextUser = game.players[game.currentTurn];
       if (isBot(nextUser)) {
-        const t = setTimeout(run, 1200);
+        const t = setTimeout(run, botMoveMs);
         try { if (isTestEnv && typeof (t as any).unref === 'function') (t as any).unref(); } catch {}
         botTimers.set(gameId, t);
       } else {
         botTimers.delete(gameId);
       }
     };
-    const t = setTimeout(run, 1200);
+    const t = setTimeout(run, botMoveMs);
     try { if (isTestEnv && typeof (t as any).unref === 'function') (t as any).unref(); } catch {}
     botTimers.set(gameId, t);
   }
@@ -178,6 +179,27 @@ export function rummyNamespace(io: Server) {
     const turnMs = rules.turnMs; // strict per-turn time
     const deadline = Date.now() + turnMs;
     try { game.turnDeadline = deadline; } catch {}
+    const serializePlayers = (g: any, winnerUserId?: string) => {
+      try {
+        const arr: Array<{ id: string; status: 'active' | 'packed' | 'winner' }> = [];
+        for (let i = 0; i < g.players.length; i++) {
+          const uid = g.players[i];
+          if (!uid) continue;
+          let status: 'active' | 'packed' | 'winner' = 'active';
+          if (winnerUserId && String(uid) === String(winnerUserId)) status = 'winner';
+          else if (g.packed?.[i]) status = 'packed';
+          arr.push({ id: String(uid), status });
+        }
+        return arr;
+      } catch { return []; }
+    };
+    // Notify clients whose turn started
+    try {
+      const pid = game.players[game.currentTurn];
+      if (pid) {
+        nsp.to(TABLE_ROOM(game.tableId)).emit('turnStarted', { playerId: pid, expiresAt: deadline, players: serializePlayers(game) });
+      }
+    } catch {}
     // Per-second tick broadcast
     try {
       const tick = setInterval(() => {
@@ -189,6 +211,8 @@ export function rummyNamespace(io: Server) {
         io.of('/rummy').to(TABLE_ROOM(g.tableId)).emit('turn-tick', {
           currentTurn: g.currentTurn,
           remainingSeconds,
+          deadline,
+          serverTs: Date.now(),
           game_id: g.id,
         });
         if (remainingMs <= 0) {
@@ -196,6 +220,21 @@ export function rummyNamespace(io: Server) {
         }
       }, 1000);
       turnTickIntervals.set(gameId, tick);
+      // Emit an immediate tick so clients can display the countdown without waiting 1s
+      try {
+        const remainingMs0 = Math.max(0, deadline - Date.now());
+        const remainingSeconds0 = Math.ceil(remainingMs0 / 1000);
+        const g0 = games.get(gameId);
+        if (g0) {
+          io.of('/rummy').to(TABLE_ROOM(g0.tableId)).emit('turn-tick', {
+            currentTurn: g0.currentTurn,
+            remainingSeconds: remainingSeconds0,
+            deadline,
+            serverTs: Date.now(),
+            game_id: g0.id,
+          });
+        }
+      } catch {}
     } catch {}
     const t = setTimeout(async () => {
       const g = games.get(gameId);
@@ -215,6 +254,11 @@ export function rummyNamespace(io: Server) {
         seats: g.players,
         phase: g.phase,
         turnDeadline: g.turnDeadline ?? null,
+        players: (() => {
+          try {
+            return g.players.map((uid, i) => ({ id: String(uid), status: g.packed?.[i] ? 'packed' : 'active' as const }));
+          } catch { return []; }
+        })(),
       });
       // If only one active player remains, conclude round
       const activeSeats = g.players.map((uid, i) => ({ uid, i })).filter(p => p.uid && !g.packed[p.i]);
@@ -329,7 +373,7 @@ export function rummyNamespace(io: Server) {
         if (uid && !g.packed[idx]) { next = idx; break; }
       }
       g.currentTurn = next;
-      try { g.turnDeadline = Date.now() + 30000; } catch {}
+      try { g.turnDeadline = Date.now() + rules.turnMs; } catch {}
       nsp.to(TABLE_ROOM(g.tableId)).emit('status', {
         code: 200,
         message: 'TurnTimeoutPacked',
@@ -531,7 +575,9 @@ export function rummyNamespace(io: Server) {
               seats: game.players,
               packed: game.packed,
               phase: game.phase,
-            turnDeadline: game.turnDeadline ?? null,
+              turnDeadline: game.turnDeadline ?? null,
+              wildCardRank: game.wildCardRank || undefined,
+              wildCardFace: (game as any).wildCardFace || undefined,
             });
             // Send each player's hand privately after toss delay (authoritative)
             for (let seat = 0; seat < game.players.length; seat++) {
@@ -543,6 +589,8 @@ export function rummyNamespace(io: Server) {
             }
             // Transition to started and kick off turn timer
             game.phase = 'started';
+            // Seed a deadline for the first turn before broadcasting status
+            try { game.turnDeadline = Date.now() + rules.turnMs; } catch {}
             // Immediately follow with a status update to avoid any clients clearing UI due to phase change
             nsp.to(TABLE_ROOM(table.id)).emit('status', {
               code: 200,
@@ -556,10 +604,17 @@ export function rummyNamespace(io: Server) {
               packed: game.packed,
               phase: game.phase,
               turnDeadline: game.turnDeadline ?? null,
+              wildCardRank: game.wildCardRank || undefined,
+              wildCardFace: (game as any).wildCardFace || undefined,
             });
             try { await persistGameSnapshot(game); } catch {}
-            scheduleTurnTimer(game.id);
-            if (isBot(game.players[game.currentTurn])) scheduleBotTurn(game.id);
+            const firstTurnDelay = disableTimers ? 0 : 1000;
+            setTimeout(() => {
+              try {
+                scheduleTurnTimer(game.id);
+                if (isBot(game.players[game.currentTurn])) scheduleBotTurn(game.id);
+              } catch {}
+            }, firstTurnDelay);
           } catch {}
         }, tossDelayMs);
         try { if (isTestEnv && typeof (tossTimer as any).unref === 'function') (tossTimer as any).unref(); } catch {}
@@ -617,6 +672,8 @@ export function rummyNamespace(io: Server) {
         canDiscard,
         myGroups,
         turnDeadline: game.turnDeadline ?? null,
+        wildCardRank: (game as any).wildCardRank || undefined,
+        wildCardFace: (game as any).wildCardFace || undefined,
       });
       try { await persistGameSnapshot(game); } catch {}
       // Proactively provide current hand only after toss phase to avoid early reveal
@@ -1132,6 +1189,7 @@ export function rummyNamespace(io: Server) {
                       nsp.to(sid).emit('my-card', { code: 200, message: 'Success', hand: next.playersHands[seat] || [] });
                     }
                     next.phase = 'started';
+                    try { next.turnDeadline = Date.now() + rules.turnMs; } catch {}
                     nsp.to(TABLE_ROOM(tbl2.id)).emit('status', {
                       code: 200,
                       message: 'Success',
@@ -1364,6 +1422,72 @@ export function rummyNamespace(io: Server) {
         return;
       }
       scheduleTurnTimer(game.id);
+    });
+
+    // Client-driven pack (timeout or manual from client): packPlayer { gameId?, playerId? }
+    socket.on('packPlayer', async (payload) => {
+      try {
+        const session = findSessionBySocket(socket.id);
+        if (!session) return;
+        const game = payload?.gameId ? games.get(String(payload.gameId)) : (session.tableId ? [...games.values()].find((g) => g.tableId === session.tableId) : undefined);
+        if (!game) return;
+        const pid = String(payload?.playerId || '');
+        const seat = pid ? game.players.findIndex((u) => String(u) === pid) : game.players.findIndex((u) => String(u) === String(session.userId));
+        if (seat < 0) return;
+        game.packed[seat] = true;
+        // Broadcast player packed
+        try {
+          const serializePlayers = (g: any, winnerUserId?: string) => {
+            try {
+              const arr: Array<{ id: string; status: 'active' | 'packed' | 'winner' }> = [];
+              for (let i = 0; i < g.players.length; i++) {
+                const uid = g.players[i];
+                if (!uid) continue;
+                let status: 'active' | 'packed' | 'winner' = 'active';
+                if (winnerUserId && String(uid) === String(winnerUserId)) status = 'winner';
+                else if (g.packed?.[i]) status = 'packed';
+                arr.push({ id: String(uid), status });
+              }
+              return arr;
+            } catch { return []; }
+          };
+          nsp.to(TABLE_ROOM(game.tableId)).emit('playerPacked', { playerId: game.players[seat], seat, players: serializePlayers(game) });
+        } catch {}
+        // If only one active player remains, end game immediately
+        const active = game.players.filter((u, i) => !!u && !game.packed[i]);
+        if (active.length <= 1) {
+          const winnerUserId = active[0] || game.players.find(u => !!u) || '';
+          try {
+            const serializePlayers = (g: any, winner?: string) => {
+              try {
+                const arr: Array<{ id: string; status: 'active' | 'packed' | 'winner' }> = [];
+                for (let i = 0; i < g.players.length; i++) {
+                  const uid = g.players[i];
+                  if (!uid) continue;
+                  let status: 'active' | 'packed' | 'winner' = 'active';
+                  if (winner && String(uid) === String(winner)) status = 'winner';
+                  else if (g.packed?.[i]) status = 'packed';
+                  arr.push({ id: String(uid), status });
+                }
+                return arr;
+              } catch { return []; }
+            };
+            nsp.to(TABLE_ROOM(game.tableId)).emit('gameOver', { game_id: game.id, table_id: game.tableId, winnerUserId, players: serializePlayers(game, winnerUserId) });
+          } catch {}
+          clearTurnTimer(game.id);
+          games.delete(game.id);
+          return;
+        }
+        // Shift turn to the next active player
+        let next = (game.currentTurn + 1) % game.players.length;
+        for (let i = 0; i < game.players.length; i++) {
+          const idx = (game.currentTurn + 1 + i) % game.players.length;
+          const uid = game.players[idx];
+          if (uid && !game.packed[idx]) { next = idx; break; }
+        }
+        game.currentTurn = next;
+        scheduleTurnTimer(game.id);
+      } catch {}
     });
 
     // declare: validate groups; if valid, end round and broadcast a summary

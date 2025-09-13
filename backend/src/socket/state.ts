@@ -35,6 +35,7 @@ export type Game = {
   playersHands: CardCode[][];
   playersGroups: CardCode[][][]; // per seat: array of groups of card codes (UI arrangement)
   wildCardRank?: RankCode;
+  wildCardFace?: CardCode; // face-up indicator card drawn from deck for wild determination
   currentTurn: number; // seat index
   startedAt: number;
   turnDeadline?: number; // epoch ms when the current turn ends
@@ -68,8 +69,9 @@ export function buildDeck(doubleDeck = true, includeJokers = true): CardCode[] {
       }
     }
     if (includeJokers) {
+      // Add two printed jokers per deck copy (standard rummy decks)
       deck.push('JKR1');
-      deck.push('JKR2');
+      deck.push('JKR1');
     }
   }
   return shuffle(deck);
@@ -149,7 +151,7 @@ export function startGameForTable(table: Table): Game {
       .filter(Boolean);
     deck = parts as CardCode[];
   } else {
-    deck = buildDeck(true, true);
+    deck = buildDeck(true, true); // Double deck with reduced jokers
   }
   const cardsPerPlayer = 13;
 
@@ -210,9 +212,22 @@ export function startGameForTable(table: Table): Game {
     }
   }
 
-  const wildCardRank = chooseWildRank();
+  // Draw a face card to determine wild rank (visible indicator card)
+  const wildCardFace = deck.shift();
+  let wildCardRank: RankCode | undefined = undefined;
+  try {
+    if (wildCardFace) {
+      const r = wildCardFace.slice(2).toUpperCase();
+      const isValid = (['A','2','3','4','5','6','7','8','9','10','J','Q','K'] as RankCode[]).includes(r as RankCode);
+      wildCardRank = isValid ? (r as RankCode) : chooseWildRank();
+    } else {
+      wildCardRank = chooseWildRank();
+    }
+  } catch {
+    wildCardRank = chooseWildRank();
+  }
 
-  // Place initial open card on discard pile
+  // Place initial open card on discard pile from remaining deck
   const initialDiscard = deck.shift() || undefined;
 
   const game: Game = {
@@ -224,6 +239,7 @@ export function startGameForTable(table: Table): Game {
     playersHands,
     playersGroups: orderedPlayers.map(() => []),
     wildCardRank,
+    wildCardFace: wildCardFace || undefined,
     currentTurn: winnerSeat,
     startedAt: Date.now(),
     turnDeadline: undefined,

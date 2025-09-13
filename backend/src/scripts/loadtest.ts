@@ -1,6 +1,6 @@
 import { io as Client } from 'socket.io-client';
 
-const URL = process.env.LOAD_URL || 'http://localhost:6969/rummy';
+const URL = process.env.LOAD_URL || 'http://localhost:8844/rummy';
 const CLIENTS = Math.max(1, Number(process.env.LOAD_CLIENTS || 50));
 
 async function main() {

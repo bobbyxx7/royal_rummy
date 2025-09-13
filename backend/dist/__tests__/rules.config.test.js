@@ -1,0 +1,50 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const rules_config_1 = require("../socket/rules.config");
+describe('rules.config', () => {
+    const envBackup = { ...process.env };
+    afterEach(() => {
+        process.env = { ...envBackup };
+    });
+    test('loads defaults when env not set', () => {
+        delete process.env.TURN_MS;
+        delete process.env.DECLARE_MS;
+        delete process.env.RECONNECT_GRACE_MS;
+        delete process.env.POINT_VALUE;
+        delete process.env.MAX_POINTS;
+        delete process.env.FIRST_DROP;
+        delete process.env.MIDDLE_DROP;
+        delete process.env.RAKE_PERCENT;
+        delete process.env.WILD_RANK_ENABLED;
+        const r = (0, rules_config_1.loadRulesConfig)();
+        expect(r.turnMs).toBeGreaterThanOrEqual(5000);
+        expect(r.declareMs).toBeGreaterThanOrEqual(10000);
+        expect(typeof r.pointValue).toBe('number');
+        expect(typeof r.maxPoints).toBe('number');
+        expect(typeof r.firstDrop).toBe('number');
+        expect(typeof r.middleDrop).toBe('number');
+        expect(typeof r.rakePercent).toBe('number');
+        expect(typeof r.wildEnabled).toBe('boolean');
+    });
+    test('respects env overrides', () => {
+        process.env.TURN_MS = '60000';
+        process.env.DECLARE_MS = '70000';
+        process.env.RECONNECT_GRACE_MS = '20000';
+        process.env.POINT_VALUE = '5';
+        process.env.MAX_POINTS = '120';
+        process.env.FIRST_DROP = '25';
+        process.env.MIDDLE_DROP = '45';
+        process.env.RAKE_PERCENT = '15';
+        process.env.WILD_RANK_ENABLED = '0';
+        const r = (0, rules_config_1.loadRulesConfig)();
+        expect(r.turnMs).toBe(60000);
+        expect(r.declareMs).toBe(70000);
+        expect(r.reconnectGraceMs).toBe(20000);
+        expect(r.pointValue).toBe(5);
+        expect(r.maxPoints).toBe(120);
+        expect(r.firstDrop).toBe(25);
+        expect(r.middleDrop).toBe(45);
+        expect(r.rakePercent).toBe(15);
+        expect(r.wildEnabled).toBe(false);
+    });
+});

@@ -39,8 +39,8 @@ export function loadConfig(): AppConfig {
   }).passthrough();
   const env = EnvSchema.parse(process.env);
   const cfg: AppConfig = {
-    port: Number(env.PORT || 6969),
-    baseUrl: env.BASE_URL || `http://localhost:${env.PORT || 6969}`,
+    port: Number(env.PORT || 8844),
+    baseUrl: env.BASE_URL || `http://localhost:${env.PORT || 8844}`,
     clientOrigin: env.CLIENT_ORIGIN || '*',
     mongoUri: env.MONGO_URI || undefined,
     mongoDb: env.MONGO_DB || 'rummy',

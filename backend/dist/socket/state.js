@@ -10,6 +10,8 @@ exports.startGameForTable = startGameForTable;
 exports.findSessionBySocket = findSessionBySocket;
 exports.clientCardToCode = clientCardToCode;
 const crypto_1 = require("crypto");
+const config_1 = require("../config");
+const rules_config_1 = require("./rules.config");
 exports.sessions = new Map(); // socketId -> session
 exports.userIdToSocket = new Map();
 exports.waitingTables = new Map(); // tableId -> table
@@ -29,7 +31,7 @@ function buildDeck(doubleDeck = true, includeJokers = true) {
         }
         if (includeJokers) {
             deck.push('JKR1');
-            deck.push('JKR2');
+            // Only add one joker per deck copy instead of two
         }
     }
     return shuffle(deck);
@@ -43,20 +45,32 @@ function shuffle(arr) {
     return a;
 }
 function chooseWildRank() {
+    const enabled = (process.env.WILD_RANK_ENABLED ?? '1') !== '0';
+    if (!enabled)
+        return undefined;
+    // Test hook: fixed wild rank
+    if ((process.env.NODE_ENV || '').toLowerCase() === 'test' && process.env.TEST_WILD_RANK) {
+        const r = String(process.env.TEST_WILD_RANK).toUpperCase();
+        if (['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'].includes(r))
+            return r;
+    }
     const ranksNoA = RANKS; // allow 'A' as 1 as well; client maps to 1
     return ranksNoA[Math.floor(Math.random() * ranksNoA.length)];
 }
-function createOrFindTable(bootValue, noOfPlayers) {
+function createOrFindTable(bootValue, noOfPlayers, format = 'points') {
     // Try to find an existing waiting table with same config and space
     for (const t of exports.waitingTables.values()) {
         if (t.status === 'waiting' &&
             t.bootValue === bootValue &&
             t.noOfPlayers === noOfPlayers &&
+            (t.format || 'points') === format &&
             t.players.filter(Boolean).length < t.noOfPlayers) {
             return t;
         }
     }
     const id = (0, crypto_1.randomUUID)();
+    const cfg = (0, config_1.loadConfig)();
+    const defaultPoint = (0, rules_config_1.loadRulesConfig)().pointValue || cfg.pointValue;
     const table = {
         id,
         bootValue,
@@ -64,6 +78,8 @@ function createOrFindTable(bootValue, noOfPlayers) {
         status: 'waiting',
         players: Array(noOfPlayers).fill(''),
         createdAt: Date.now(),
+        pointValue: defaultPoint,
+        format,
     };
     exports.waitingTables.set(id, table);
     return table;
@@ -82,27 +98,102 @@ function joinTable(table, userId) {
 function startGameForTable(table) {
     const activePlayers = table.players.filter(Boolean);
     const gameId = (0, crypto_1.randomUUID)();
-    const deck = buildDeck(true, true);
-    const playersHands = activePlayers.map(() => []);
+    // Build deck with optional test override
+    let deck;
+    if ((process.env.NODE_ENV || '').toLowerCase() === 'test' && process.env.TEST_FIXED_DECK) {
+        const parts = String(process.env.TEST_FIXED_DECK)
+            .split(',')
+            .map((s) => s.trim().toUpperCase())
+            .filter(Boolean);
+        deck = parts;
+    }
+    else {
+        deck = buildDeck(true, true); // Double deck with reduced jokers
+    }
     const cardsPerPlayer = 13;
-    for (let i = 0; i < cardsPerPlayer; i++) {
+    // Toss for seating order: draw one card per player, highest rank first (Ace high)
+    // Phase: toss
+    const rankOrder = { 'A': 14, 'K': 13, 'Q': 12, 'J': 11 };
+    const suitPriority = { RP: 4, BP: 3, BL: 2, RS: 1 }; // hearts > spades > clubs > diamonds
+    const joinOrder = [...activePlayers];
+    let orderedPlayers = [];
+    let winnerSeat = 0;
+    let drawForTossTop;
+    let drawForTossBottom;
+    const cardsByUser = {};
+    if ((process.env.TOSS_JOIN_ORDER ?? '0') === '1') {
+        orderedPlayers = [...joinOrder];
+        winnerSeat = 0;
+    }
+    else {
+        const tossDraws = [];
+        const tossDeck = buildDeck(false, false);
         for (let p = 0; p < activePlayers.length; p++) {
+            const tossCard = tossDeck.shift();
+            const suit = tossCard.slice(0, 2).toUpperCase();
+            const r = tossCard.slice(2).toUpperCase();
+            const base = rankOrder[r] || Number(r) || 0;
+            const val = base * 10 + (suitPriority[suit] || 0); // tie-break by suit priority
+            tossDraws.push({ uid: activePlayers[p], card: tossCard, value: val });
+        }
+        tossDraws.sort((a, b) => b.value - a.value);
+        orderedPlayers = tossDraws.map(t => t.uid);
+        winnerSeat = 0;
+        drawForTossTop = tossDraws[0]?.card;
+        drawForTossBottom = tossDraws[1]?.card || drawForTossTop;
+        for (const t of tossDraws)
+            cardsByUser[t.uid] = t.card;
+    }
+    // Phase: dealing with optional fixed hands per seat in tests
+    const playersHands = orderedPlayers.map(() => []);
+    if ((process.env.NODE_ENV || '').toLowerCase() === 'test') {
+        for (let p = 0; p < orderedPlayers.length; p++) {
+            const envKey = `TEST_HAND_S${p}`;
+            const val = process.env[envKey];
+            if (val && typeof val === 'string' && val.trim().length > 0) {
+                const codes = val.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+                for (const c of codes) {
+                    const idx = deck.indexOf(c);
+                    if (idx >= 0)
+                        deck.splice(idx, 1);
+                }
+                playersHands[p] = codes.slice(0, cardsPerPlayer);
+            }
+        }
+    }
+    // Deal remaining cards up to cardsPerPlayer
+    for (let i = 0; i < cardsPerPlayer; i++) {
+        for (let p = 0; p < orderedPlayers.length; p++) {
+            if ((playersHands[p] || []).length > i)
+                continue;
             const card = deck.shift();
             if (card)
                 playersHands[p].push(card);
         }
     }
     const wildCardRank = chooseWildRank();
+    // Place initial open card on discard pile
+    const initialDiscard = deck.shift() || undefined;
     const game = {
         id: gameId,
         tableId: table.id,
-        players: [...table.players],
+        players: [...orderedPlayers],
         deck,
-        discardPile: [],
+        discardPile: initialDiscard ? [initialDiscard] : [],
         playersHands,
+        playersGroups: orderedPlayers.map(() => []),
         wildCardRank,
-        currentTurn: 0,
+        currentTurn: winnerSeat,
         startedAt: Date.now(),
+        turnDeadline: undefined,
+        drawnThisTurn: orderedPlayers.map(() => false),
+        hasPlayedAnyTurn: orderedPlayers.map(() => false),
+        packed: orderedPlayers.map(() => false),
+        toss: { winnerSeat, winnerUserId: orderedPlayers[winnerSeat], topCard: drawForTossTop, bottomCard: drawForTossBottom, cardsByUser, order: joinOrder },
+        pointValue: table.pointValue || Number(process.env.POINT_VALUE || 1),
+        lastDrawnCard: orderedPlayers.map(() => null),
+        lastDrawnFrom: orderedPlayers.map(() => null),
+        phase: 'started',
     };
     exports.games.set(gameId, game);
     table.status = 'playing';
@@ -120,6 +211,18 @@ const suitToCode = {
 function clientCardToCode(card) {
     if (!card)
         return null;
+    // Accept already-encoded card codes (e.g., 'RP7', 'BL10', 'JKR1')
+    if (typeof card === 'string') {
+        const s = String(card).toUpperCase();
+        if (s.startsWith('JKR'))
+            return s;
+        const suit = s.slice(0, 2);
+        const rank = s.slice(2);
+        if (['RP', 'BP', 'BL', 'RS'].includes(suit) && ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'].includes(rank)) {
+            return s;
+        }
+        return null;
+    }
     if (card.isJoker)
         return 'JKR1';
     const suit = suitToCode[String(card.suit || '').toLowerCase()];

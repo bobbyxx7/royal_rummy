@@ -11,6 +11,7 @@ import { authRouter } from './services/auth.routes';
 import { userRouter } from './services/user.routes';
 import { connectMongo } from './db';
 import { rummyNamespace, restoreSnapshots } from './socket/rummy.namespace';
+import { teenPattiNamespace } from './socket/teenpatti.namespace';
 import { registerIo } from './socket/emitter';
 import { adminRouter } from './services/admin.routes';
 import { tablesRouter } from './services/tables.routes';
@@ -70,9 +71,10 @@ app.use('/api/test', testRouter);
 
 const io = new Server(server, { cors: getCorsOptions(), path: '/socket.io' });
 
-// Socket namespace expected by app: '/rummy'
+// Socket namespaces expected by app: '/rummy' and '/teenpatti'
 registerIo(io);
 rummyNamespace(io);
+teenPattiNamespace(io);
 
 async function start() {
   const mongoUri = cfg.mongoUri || '';
@@ -93,7 +95,7 @@ async function start() {
       console.error('[db] connection failed', e);
     }
   }
-  server.listen(PORT, () => {
+  server.listen(PORT, '0.0.0.0', () => {
     // eslint-disable-next-line no-console
     console.log(`Backend listening on ${cfg.baseUrl}`);
   });

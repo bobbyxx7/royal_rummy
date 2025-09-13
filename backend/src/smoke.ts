@@ -1,6 +1,6 @@
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:6969/rummy', {
+const socket = io('http://localhost:8844/rummy', {
   transports: ['websocket'],
   query: { userId: 'u1' },
 });

@@ -1,6 +1,6 @@
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = process.env.SOCKET_URL || 'http://localhost:6969/rummy';
+const SOCKET_URL = process.env.SOCKET_URL || 'http://localhost:8844/rummy';
 const USER_ID = process.env.BOT_USER_ID || `dev-bot-${Math.floor(Math.random() * 1e6)}`;
 const BOOT_VALUE = String(process.env.BOOT_VALUE || '80');
 const NUM_PLAYERS = String(process.env.NUM_PLAYERS || '2');
